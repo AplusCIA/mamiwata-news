@@ -1,0 +1,132 @@
+version: '3.9'
+
+services:
+  # MongoDB Database
+  mongo:
+    image: mongo:7.0-alpine
+    container_name: mamiwata-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: changeme
+      MONGO_INITDB_DATABASE: mamiwata-news
+    volumes:
+      - mongo-data:/data/db
+      - mongo-configdb:/data/configdb
+    networks:
+      - mamiwata-network
+    healthcheck:
+      test: mongosh --eval 'db.adminCommand("ping")' --quiet || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: mamiwata-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - mamiwata-network
+    command: redis-server --requirepass changeme --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: mamiwata-backend
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      NODE_ENV: development
+      MONGODB_URI: mongodb://admin:changeme@mongo:27017/mamiwata-news?authSource=admin
+      REDIS_URL: redis://:changeme@redis:6379
+      JWT_SECRET: your-super-secret-jwt-key
+      JWT_REFRESH_SECRET: your-super-secret-refresh-key
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/logs:/app/logs
+      - /app/node_modules
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - mamiwata-network
+    healthcheck:
+      test: curl -f http://localhost:5000/api/v1/health || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    env_file:
+      - .env.local
+
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: mamiwata-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      NEXT_PUBLIC_API_URL: http://backend:5000/api/v1
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - /app/.next
+      - /app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - mamiwata-network
+    healthcheck:
+      test: curl -f http://localhost:3000 || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    env_file:
+      - .env.local
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: mamiwata-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend/public:/usr/share/nginx/html/public:ro
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - mamiwata-network
+
+volumes:
+  mongo-data:
+  mongo-configdb:
+  redis-data:
+
+networks:
+  mamiwata-network:
+    driver: bridge
